@@ -1,0 +1,32 @@
+# The terminal app:
+#   docker compose run --rm cutecat
+#
+# The Discord bot:
+# above and /connect, so the api key is in the volume):
+#   docker compose up -d discord
+#
+# Both share the same two volumes:
+#   cutecat-config  — api keys, sessions, skills, routines
+#   ./workspace     — files the agent creates, saved on your host
+
+services:
+  cutecat:
+    build: .
+    image: cutecat
+    stdin_open: true      # -i
+    tty: true             # -t  (the TUI needs a real terminal)
+    volumes:
+      - cutecat-config:/root/.cutecat
+      - ./workspace:/workspace
+
+  discord:
+    build: .
+    image: cutecat
+    command: ["discord", "--run"]
+    restart: unless-stopped
+    volumes:
+      - cutecat-config:/root/.cutecat
+      - ./workspace:/workspace
+
+volumes:
+  cutecat-config:

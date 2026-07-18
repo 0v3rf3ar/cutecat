@@ -1,0 +1,100 @@
+#   linux-x86_64    ubuntu-latest
+#   linux-arm64     ubuntu-24.04-arm
+#   macos-silicon   macos-latest
+#   windows-x86_64  windows-latest
+
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    name: linux-x86_64   }
+          - { os: ubuntu-24.04-arm, name: linux-arm64    }
+          - { os: macos-latest,     name: macos-silicon  }
+          - { os: windows-latest,   name: windows-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: echo "version=$(sed -n 's/^__version__ *= *"\(.*\)"/\1/p' src/cutecat/__init__.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        id: py
+        uses: actions/setup-python@v5
+        with:
+          # 3.12 has the widest wheel coverage for the voice ML
+          python-version: "3.12"
+
+      - name: Build with biys.sh (Linux / macOS)
+        if: runner.os != 'Windows'
+        env:
+          PYTHON_BIN: ${{ steps.py.outputs.python-path }}
+        run: bash biys.sh
+
+      - name: Build with biys.bat (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          PYTHON_BIN: ${{ steps.py.outputs.python-path }}
+        run: biys.bat
+
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          base="cutecat-${{ steps.ver.outputs.version }}-${{ matrix.name }}"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            tar -czf "dist/${base}.tar.gz" -C dist cutecat
+            echo "ARCHIVE=dist/${base}.tar.gz" >> "$GITHUB_ENV"
+          else
+            zip -j "dist/${base}.zip" dist/cutecat
+            echo "ARCHIVE=dist/${base}.zip" >> "$GITHUB_ENV"
+          fi
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $base = "cutecat-${{ steps.ver.outputs.version }}-${{ matrix.name }}"
+          Compress-Archive -Path dist/cutecat.exe -DestinationPath "dist/$base.zip" -Force
+          "ARCHIVE=dist/$base.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cutecat-${{ matrix.name }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every built binary
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true

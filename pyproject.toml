@@ -1,0 +1,30 @@
+[project]
+name = "cutecat"
+version = "0.44.0"
+description = "A fast, self-contained AI agent for coding and automation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = ["ai", "agent", "cli", "terminal", "coding", "automation", "llm"]
+dependencies = [
+    "rich>=13.7",
+    "textual>=1.0",
+    "requests>=2.31",
+    "platformdirs>=4.0",
+    "cryptography>=42",
+    "certifi>=2024.2.2",
+]
+
+[project.optional-dependencies]
+discord = ["discord.py>=2.3"]
+voice = ["faster-whisper>=1.0"]
+
+[project.scripts]
+cutecat = "cutecat.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cutecat"]

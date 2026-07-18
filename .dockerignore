@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+.venv-build
+dist
+dist_standalone
+build
+.github
+*.egg-info
+__pycache__
+**/__pycache__
+*.pyc
+tests
+workspace
+.cutecat
