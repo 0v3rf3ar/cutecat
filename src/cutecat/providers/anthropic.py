@@ -165,13 +165,18 @@ class AnthropicProvider(Provider):
             "stream": True,
         }
         if system_text:
-            payload["system"] = system_text
+            payload["system"] = [{
+                "type": "text",
+                "text": system_text,
+                "cache_control": {"type": "ephemeral"},
+            }]
         if tools:
             payload["tools"] = self._tools(tools)
+        _mark_cache_point(msgs)
 
         # index -> {"name": str, "args": str} for in-flight tool_use blocks
         tool_blocks: dict[int, dict] = {}
-        tokens = {"input": 0, "output": 0}   # Anthropic reports these in the stream
+        tokens = {"input": 0, "output": 0, "cached": 0}
         try:
             with requests.post(
                 f"{self.BASE_URL}/messages",
@@ -203,7 +208,13 @@ class AnthropicProvider(Provider):
                         msg = data.get("message")
                         u = msg.get("usage") if isinstance(msg, dict) else None
                         if isinstance(u, dict):
-                            tokens["input"] = int(u.get("input_tokens") or 0)
+                            cached = int(u.get("cache_read_input_tokens") or 0)
+                            tokens["cached"] = cached
+                            tokens["input"] = (
+                                int(u.get("input_tokens") or 0)
+                                + cached
+                                + int(u.get("cache_creation_input_tokens") or 0)
+                            )
                     elif etype == "message_delta":
                         u = data.get("usage")
                         if isinstance(u, dict) and u.get("output_tokens"):
@@ -254,6 +265,25 @@ class AnthropicProvider(Provider):
         except ValueError:  # includes requests' JSONDecodeError
             text = (resp.text or "").strip()
             return text[:300] if text else f"HTTP {resp.status_code}"
+
+
+def _mark_cache_point(msgs: list[dict]) -> None:
+    """Cache the whole prefix up to the latest turn, so the next step re-reads
+    the history at a tenth of the price instead of paying for it again."""
+    for m in reversed(msgs):
+        content = m.get("content")
+        if isinstance(content, list) and content:
+            last = content[-1]
+            if isinstance(last, dict):
+                last["cache_control"] = {"type": "ephemeral"}
+                return
+        elif isinstance(content, str) and content:
+            m["content"] = [{
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }]
+            return
 
 
 def _msg(err: object) -> str:

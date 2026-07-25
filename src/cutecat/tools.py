@@ -18,24 +18,15 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "run_command",
             "description": (
-                "Run a shell command in the user's real, persistent terminal "
-                "(cwd and environment persist between calls). Use this to "
-                "inspect the system, search files (ls, grep, find), run builds, "
-                "call curl, etc. Read-only commands run immediately; commands "
-                "that change the system ask the user first."
+                "Run a shell command in a real, persistent terminal (cwd and "
+                "environment persist between calls). For inspecting, searching, "
+                "building and testing."
             ),
             "parameters": {
                 "type": "object",
                 "required": ["command"],
                 "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The exact command line to execute.",
-                    },
-                    "explanation": {
-                        "type": "string",
-                        "description": "One short sentence on why you are running it.",
-                    },
+                    "command": {"type": "string", "description": "The command line."},
                 },
             },
         },
@@ -45,24 +36,16 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_file",
             "description": (
-                "Read a text file and return its contents with line numbers. "
-                "Read before editing so you can craft an exact edit. Use offset "
-                "and limit to read only the part you need instead of the whole "
-                "file."
+                "Read a text file, with line numbers. Read before editing. Use "
+                "offset/limit to take only the part you need."
             ),
             "parameters": {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string", "description": "File path to read."},
-                    "offset": {
-                        "type": "integer",
-                        "description": "1-based line to start from (optional).",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max lines to read (optional).",
-                    },
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer", "description": "1-based start line."},
+                    "limit": {"type": "integer", "description": "Max lines."},
                 },
             },
         },
@@ -72,28 +55,20 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "edit_file",
             "description": (
-                "Make a surgical edit to an existing file by replacing an exact "
-                "snippet. Provide old_string (copied verbatim from the file, with "
-                "enough surrounding context to be unique) and new_string. Do NOT "
-                "resend the whole file — only the snippet that changes. The user "
-                "is shown a diff and must approve it."
+                "Replace an exact snippet in an existing file. old_string must be "
+                "copied verbatim and be unique — send only the lines that change, "
+                "never the whole file."
             ),
             "parameters": {
                 "type": "object",
                 "required": ["path", "old_string", "new_string"],
                 "properties": {
-                    "path": {"type": "string", "description": "File path to edit."},
-                    "old_string": {
-                        "type": "string",
-                        "description": "Exact text to find (unique in the file).",
-                    },
-                    "new_string": {
-                        "type": "string",
-                        "description": "Replacement text.",
-                    },
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string", "description": "Exact text, unique."},
+                    "new_string": {"type": "string"},
                     "replace_all": {
                         "type": "boolean",
-                        "description": "Replace every occurrence (default false).",
+                        "description": "Replace every occurrence.",
                     },
                 },
             },
@@ -104,16 +79,14 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "create_file",
             "description": (
-                "Create a NEW file with the given content (or overwrite an "
-                "existing one). Use edit_file to change existing files. Shows a "
-                "diff and asks the user first."
+                "Create a new file. To change an existing one, use edit_file."
             ),
             "parameters": {
                 "type": "object",
                 "required": ["path", "content"],
                 "properties": {
-                    "path": {"type": "string", "description": "File path to write."},
-                    "content": {"type": "string", "description": "Full file contents."},
+                    "path": {"type": "string"},
+                    "content": {"type": "string", "description": "Full contents."},
                 },
             },
         },
@@ -123,56 +96,149 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "browse",
             "description": (
-                "Open a URL in a real headless Chrome/Chromium — it runs the "
-                "page's JavaScript, so use it when curl is not enough (a page "
-                "that renders client-side, or one that returns an empty shell "
-                "to curl), and whenever the user wants a screenshot or a PDF "
-                "of a page. action=text returns the readable text (default), "
-                "html the rendered HTML, screenshot a PNG, pdf a PDF. Saving a "
-                "file asks the user first."
+                "Open a URL in headless Chrome, running the page's JavaScript. "
+                "Use when curl returns an empty shell, or to capture a page."
             ),
             "parameters": {
                 "type": "object",
                 "required": ["url"],
                 "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The page to open (https:// is assumed).",
-                    },
+                    "url": {"type": "string"},
                     "action": {
                         "type": "string",
                         "enum": ["text", "html", "screenshot", "pdf"],
-                        "description": "What to return. Defaults to text.",
+                        "description": "Default text.",
                     },
-                    "path": {
-                        "type": "string",
-                        "description": (
-                            "Where to write the PNG/PDF (screenshot and pdf "
-                            "only). Defaults to screenshot.png in the cwd."
-                        ),
-                    },
+                    "path": {"type": "string", "description": "Where to save a capture."},
                     "full_page": {
                         "type": "boolean",
-                        "description": (
-                            "Screenshots only. True (the default) captures the "
-                            "whole page, scrolled to the end; false captures "
-                            "just the viewport."
-                        ),
+                        "description": "Whole page, not just the viewport. Default true.",
                     },
-                    "width": {"type": "integer", "description": "Viewport width (px)."},
-                    "height": {"type": "integer", "description": "Viewport height (px)."},
-                    "wait_ms": {
-                        "type": "integer",
-                        "description": (
-                            "How long to let the page's scripts run before "
-                            "capturing it. Default 5000."
-                        ),
-                    },
+                    "width": {"type": "integer"},
+                    "height": {"type": "integer"},
+                    "wait_ms": {"type": "integer", "description": "Script time, default 5000."},
                 },
             },
         },
     },
 ]
+
+
+TASK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "set_tasks",
+        "description": (
+            "Post your plan for work that takes three or more steps, then call "
+            "again to restack it as you go: exactly one step 'running', finished "
+            "ones 'done'. The user watches this list. Skip it for short work."
+        ),
+        "parameters": {
+            "type": "object",
+            "required": ["tasks"],
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "The full list, in order, every time.",
+                    "items": {
+                        "type": "object",
+                        "required": ["title", "status"],
+                        "properties": {
+                            "title": {"type": "string", "description": "A few words."},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "running", "done"],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+AGENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_agent",
+        "description": (
+            "Hand a self-contained piece of work to a subagent, which does it in "
+            "its own context and reports back a summary. Use it to keep bulky "
+            "work out of this conversation — searching a large codebase, reading "
+            "many files to answer one question, or an independent chunk of a "
+            "bigger task. Give it everything it needs: it cannot see this "
+            "conversation. Do not use it for a single command or file read."
+        ),
+        "parameters": {
+            "type": "object",
+            "required": ["description", "prompt"],
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "A few words naming the job, for the user.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The full task, self-contained: what to do, where to "
+                        "look, and exactly what to report back."
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["explore", "build"],
+                    "description": (
+                        "explore (default) investigates and reports without "
+                        "changing anything; build may edit files."
+                    ),
+                },
+            },
+        },
+    },
+}
+
+_STATUS_VALUES = ("pending", "running", "done")
+
+
+def set_tasks(ctx: ToolContext, args: dict) -> str:
+    raw = args.get("tasks")
+    if not isinstance(raw, list) or not raw:
+        return "error: tasks must be a non-empty array"
+    tasks = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return "error: each task must be an object with title and status"
+        title = _str_arg(item, "title")
+        status = (_str_arg(item, "status") or "pending").lower()
+        if not title:
+            continue
+        if status not in _STATUS_VALUES:
+            status = "pending"
+        tasks.append({"title": title[:80], "status": status})
+    if not tasks:
+        return "error: no usable tasks"
+    sink = getattr(ctx, "set_tasks", None)
+    if sink is not None:
+        sink(tasks)
+    done = sum(1 for t in tasks if t["status"] == "done")
+    return f"tasks updated ({done}/{len(tasks)} done)"
+
+
+def run_agent(ctx: ToolContext, args: dict) -> str:
+    spawn = getattr(ctx, "spawn", None)
+    if spawn is None:
+        return "error: subagents aren't available here — do the work yourself"
+    description = _str_arg(args, "description") or "subagent"
+    prompt = _str_arg(args, "prompt")
+    if not prompt:
+        return "error: prompt is required and must describe the whole task"
+    kind = (_str_arg(args, "kind") or "explore").lower()
+    if kind not in ("explore", "build"):
+        kind = "explore"
+    try:
+        return spawn(description, prompt, kind)
+    except Exception as exc:
+        return f"error: the subagent failed: {exc.__class__.__name__}: {exc}"
 
 
 def _truncate(text: str) -> str:
@@ -197,6 +263,11 @@ class ToolContext:
         chromium: str | None = None,
         workspace: str | None = None,
         send_file: Callable[[str, str | None], str] | None = None,
+        sandbox=None,
+        allow_kind: Callable[[str], bool] | None = None,
+        ask_command: Callable[[str, str, str], bool] | None = None,
+        set_tasks: Callable[[list], None] | None = None,
+        spawn: Callable[[str, str, str], str] | None = None,
     ):
         self.shell = shell
         # Optional path to a Chrome/Chromium for the browse tool ("chromium" in
@@ -204,6 +275,16 @@ class ToolContext:
         self.chromium = chromium
         # The agent may only read/write under this directory. None = anywhere.
         self.workspace = workspace
+        # write boundary; reads pass through
+        self.sandbox = sandbox
+        # (kind) -> already allowed this session?
+        self.allow_kind = allow_kind or (lambda _k: False)
+        self.ask_command = ask_command or (
+            lambda command, reason, _kind: ask_permission(f"run: {command}", reason)
+        )
+        # unset = not offered
+        self.set_tasks = set_tasks
+        self.spawn = spawn
         # A frontend-provided tool that sends a file to the user (Discord).
         # When set, the send_file tool is offered to the model.
         self.send_file = send_file
@@ -242,6 +323,17 @@ class ToolContext:
         return added, removed
 
 
+def command_kind(command: str) -> str:
+    head = command.strip().split()
+    if not head:
+        return ""
+    tool = head[0].rsplit("/", 1)[-1].lower()
+    if tool in ("git", "gh", "npm", "pnpm", "yarn", "docker", "cargo", "go", "pip"):
+        sub = head[1].lower() if len(head) > 1 else ""
+        return f"{tool} {sub}".strip()
+    return tool
+
+
 def run_command(ctx: ToolContext, args: dict) -> str:
     command = _str_arg(args, "command")
     if not command:
@@ -250,17 +342,73 @@ def run_command(ctx: ToolContext, args: dict) -> str:
     decision = policy.classify(command)
     if decision.touches_tmp and not ctx.ask_tmp():
         return "error: user denied access to the temp directory"
-    if not decision.allowed:
-        if not ctx.ask_permission(f"run: {command}", decision.reason):
+
+    if decision.verdict != policy.ALLOW:
+        cwd = getattr(ctx.shell, "cwd", None)
+        blocked = _sandbox_blocked_command(ctx, command, cwd)
+        if blocked:
+            return blocked
+
+    if _needs_asking(ctx, decision, command):
+        if not ctx.ask_command(command, decision.reason, command_kind(command)):
             return "error: user denied permission to run this command"
 
     return ctx.run_job(command)
 
 
-def format_job_result(command: str, exit_code, output: str) -> str:
+def _needs_asking(ctx: ToolContext, decision, command: str) -> bool:
+    if decision.verdict == policy.ALLOW:
+        return False
+    if ctx.allow_kind(command_kind(command)):
+        return False
+    if decision.verdict == policy.DANGER:
+        return True
+    return not _sandboxed(ctx)  # a write, already confined
+
+
+def _sandboxed(ctx: ToolContext) -> bool:
+    box = getattr(ctx, "sandbox", None)
+    return bool(box is not None and getattr(box, "enabled", False))
+
+
+def _sandbox_blocked_command(ctx: ToolContext, command: str, cwd) -> str | None:
+    box = getattr(ctx, "sandbox", None)
+    if box is None:
+        return None
+    return box.check_command(command, cwd)
+
+
+def _write_blocked(ctx: ToolContext, target: Path) -> str | None:
+    blocked = _ws_blocked(ctx, target)
+    if blocked:
+        return blocked
+    box = getattr(ctx, "sandbox", None)
+    if box is None:
+        return None
+    return box.check_path(target, getattr(ctx.shell, "cwd", None))
+
+
+SLOW_COMMAND = 60.0
+QUIET_COMMAND = 30.0
+
+
+def format_job_result(command: str, exit_code, output: str,
+                      ran_for: float = 0.0, silent_for: float = 0.0) -> str:
     body = output or "(no output)"
     code = "interrupted" if exit_code is None else exit_code
-    return _truncate(f"exit code: {code}\n{body}")
+    notes = []
+    if ran_for >= SLOW_COMMAND:
+        notes.append(f"took {int(ran_for)}s")
+    if silent_for >= QUIET_COMMAND and ran_for >= SLOW_COMMAND:
+        notes.append(
+            f"produced no output for its last {int(silent_for)}s — if you run it "
+            "again, expect the same wait, so use a faster command or send it to "
+            "the background instead of repeating it"
+        )
+    head = f"exit code: {code}"
+    if notes:
+        head += " (" + "; ".join(notes) + ")"
+    return _truncate(f"{head}\n{body}")
 
 
 #arguments
@@ -380,7 +528,7 @@ def edit_file(ctx: ToolContext, args: dict) -> str:
         return "error: old_string and new_string are identical — nothing to change"
 
     target = _resolve(ctx, path)
-    blocked = _ws_blocked(ctx, target)
+    blocked = _write_blocked(ctx, target)
     if blocked:
         return blocked
     if policy.touches_tmp(str(target)) and not ctx.ask_tmp():
@@ -407,7 +555,7 @@ def edit_file(ctx: ToolContext, args: dict) -> str:
         return "error: the edit would not change the file"
 
     added, removed = ctx.preview_diff(str(target), content, updated)
-    if not ctx.ask_edit(f"edit {target}", f"+{added} -{removed}"):
+    if not _sandboxed(ctx) and not ctx.ask_edit(f"edit {target}", f"+{added} -{removed}"):
         return "error: user denied the edit"
 
     try:
@@ -429,7 +577,7 @@ def create_file(ctx: ToolContext, args: dict) -> str:
         return "error: no path provided"
 
     target = _resolve(ctx, path)
-    blocked = _ws_blocked(ctx, target)
+    blocked = _write_blocked(ctx, target)
     if blocked:
         return blocked
     if policy.touches_tmp(str(target)) and not ctx.ask_tmp():
@@ -444,7 +592,7 @@ def create_file(ctx: ToolContext, args: dict) -> str:
             old = ""
     added, removed = ctx.preview_diff(str(target), old, content)
     verb = "overwrite" if old else "create"
-    if not ctx.ask_edit(f"{verb} {target}", f"+{added} -{removed}"):
+    if not _sandboxed(ctx) and not ctx.ask_edit(f"{verb} {target}", f"+{added} -{removed}"):
         return f"error: user denied permission to {verb} this file"
 
     try:
@@ -502,13 +650,13 @@ def browse(ctx: ToolContext, args: dict) -> str:
     suffix = "pdf" if action == "pdf" else "png"
     path = _str_arg(args, "path") or f"screenshot.{suffix}"
     target = _resolve(ctx, path)
-    blocked = _ws_blocked(ctx, target)
+    blocked = _write_blocked(ctx, target)
     if blocked:
         return blocked
     if policy.touches_tmp(str(target)) and not ctx.ask_tmp():
         return "error: user denied access to the temp directory"
     verb = "save a PDF of" if action == "pdf" else "screenshot"
-    if not ctx.ask_permission(f"{verb} {url}", f"writes {target}"):
+    if not _sandboxed(ctx) and not ctx.ask_permission(f"{verb} {url}", f"writes {target}"):
         return f"error: user denied permission to {verb} this page"
 
     ctx.note(f"capturing {url}")
@@ -578,6 +726,8 @@ DISPATCH = {
     "create_file": create_file,
     "browse": browse,
     "send_file": send_file,
+    "set_tasks": set_tasks,
+    "run_agent": run_agent,
 }
 
 

@@ -33,6 +33,7 @@ from cutecat import clipboard
 from cutecat import config as config_mod
 from cutecat import routines as routines_mod
 from cutecat import agent as agent_mod
+from cutecat import sandbox as sandbox_mod
 from cutecat import tools as tools_mod
 from cutecat.providers import PROVIDERS, get_provider
 from cutecat.providers.base import Provider, ProviderError
@@ -842,18 +843,14 @@ class PromptArea(TextArea):
             event.prevent_default()
             self.app.report_key(event)
             return
-        # While a permission popup is up, single keys answer it and all other
+        # While a permission popup is up it owns the keyboard and all other
         # typing is swallowed (esc bubbles to the global cancel binding).
         if getattr(self.app, "mode", None) == CHOICE:
             if event.key == "escape":
                 return
             event.stop()
             event.prevent_default()
-            options = self.app._choice_options or {}
-            if event.key == "enter":
-                self.app._resolve_choice(self.app._choice_default)
-            elif event.key in options:
-                self.app._resolve_choice(options[event.key])
+            self.app._choice_key(event.key)
             return
         # Tab completes a slash command (e.g. "/mod" -> "/model ").
         if event.key == "tab" and self._complete_command():
@@ -1032,6 +1029,55 @@ SHELL_DIRECTIVES = {
         " and NOT PowerShell cmdlets. Paths use backslashes."
     ),
 }
+
+DELEGATE_DIRECTIVE = (
+    "# delegating\n\n"
+    "`set_tasks` and `run_agent` are yours to manage the work itself.\n\n"
+    "- Post a `set_tasks` list once the job needs three or more steps, and "
+    "restack it as you finish each one. One step is 'running' at a time.\n"
+    "- Send a self-contained chunk to `run_agent` when finding the answer would "
+    "cost many tool calls whose output you don't need to keep — searching a "
+    "large tree, reading a pile of files to answer one question. It reports "
+    "back a summary, and the digging never enters this conversation.\n"
+    "- Do it yourself when it is one command, one file, or when you need the "
+    "raw output in front of you."
+)
+
+SUBAGENT_STEPS = 15
+
+_SUBAGENT_BASE = (
+    "You are a subagent working for another AI agent, not for a human. You "
+    "cannot see its conversation and cannot ask it anything — work only from "
+    "the task you were given.\n\n"
+    "Your reply is the ONLY thing that reaches it, so answer with the findings "
+    "themselves: the file paths, line numbers, names, and facts it asked for. "
+    "No preamble, no offers to help further, no description of how you looked. "
+    "Be complete but tight — every token you write is a token it must read.\n\n"
+    "Work under `{root}`."
+)
+
+SUBAGENT_PROMPTS = {
+    "explore": _SUBAGENT_BASE + (
+        "\n\nInvestigate only. Do not create, edit, or delete anything, and do "
+        "not run commands that change the system."
+    ),
+    "build": _SUBAGENT_BASE + (
+        "\n\nYou may edit and create files to complete the task. Report what you "
+        "changed, by path."
+    ),
+}
+
+SANDBOX_DIRECTIVE = (
+    "# your workspace\n\n"
+    "You may create and change files only under `{root}`. Everything you build"
+    " for the user goes there; relative paths resolve there. Reading outside is"
+    " fine, but a write outside is refused — do not retry it, do not try to work"
+    " around it, and never `cd` out of the workspace. If a task genuinely needs"
+    " to write elsewhere, say so and let the user decide.\n\n"
+    "Inside the workspace you do not need permission for ordinary work: creating"
+    " files, editing, building, running tests and scripts all go ahead"
+    " immediately. Just do them."
+)
 
 BUILD_DIRECTIVE = (
     "# agent mode: build\n\n"
@@ -1325,6 +1371,13 @@ class CuteCatApp(App):
         background: $cc-bg;
         display: none;
     }}
+    #taskpanel {{
+        display: none;
+        height: auto;
+        padding: 0 1;
+        color: $cc-muted;
+        background: $cc-bg;
+    }}
     #popup {{
         display: none;
         height: auto;
@@ -1339,7 +1392,7 @@ class CuteCatApp(App):
         background: $cc-panel;
     }}
     #popup-opts {{
-        height: 1;
+        height: auto;
         margin-top: 1;
         color: $cc-muted;
         background: $cc-panel;
@@ -1451,6 +1504,8 @@ class CuteCatApp(App):
     def __init__(self, session: dict | None = None) -> None:
         super().__init__()
         self.cfg = config_mod.load_config()
+        self.cwd = os.getcwd()
+        self._sandbox = sandbox_mod.from_config(self.cfg, self.cwd)
         self._resumed = session is not None
         session = session or {}
         self.session_id: str = session.get("id") or config_mod.new_session_id()
@@ -1469,6 +1524,7 @@ class CuteCatApp(App):
         self._tools_disabled = False  # set when a provider rejects tool calls
         self._tok_in = int(session.get("tokens_in") or 0)   # tokens used this session
         self._tok_out = int(session.get("tokens_out") or 0)
+        self._tok_cached = int(session.get("tokens_cached") or 0)
         self._system = self._build_system_prompt()
         self.mode = NORMAL
         self._busy = False
@@ -1496,10 +1552,15 @@ class CuteCatApp(App):
         self.key_debug = False
         self._dark = True
         self._mode = "dark"
-        self.cwd = os.getcwd()
         self._shell = None
         self._tmp_granted = False
         self._allow_all_edits = False
+        self._allowed_kinds: set[str] = set()
+        self._tasks: list[dict] = []
+        self._tasks_started = 0.0
+        self._subagents: dict[int, dict] = {}
+        self._next_agent_id = 1
+        self._agent_cancel = lambda: False
         self._stick_bottom = True
         self._user_msgs: list[tuple[Static, str]] = []
         self._running_job = None        # command currently in the foreground
@@ -1510,8 +1571,9 @@ class CuteCatApp(App):
         self._agent_cancel = lambda: False
         self._choice_event: threading.Event | None = None
         self._choice_result = ""
-        self._choice_options: dict | None = None
+        self._choice_options: list | None = None
         self._choice_default = ""
+        self._choice_index = 0
         self._picker_values: list = []      # the values currently shown
         self._picker_all: list = []          # every option, before the search
         self._picker_filter = ""             # what you have typed to search
@@ -1540,6 +1602,7 @@ class CuteCatApp(App):
                     action=self.action_jump_bottom,
                 )
         with Vertical(id="bottom"):
+            yield Static("", id="taskpanel")
             yield Static("", id="indicator")
             with Vertical(id="popup"):
                 yield Static("", id="popup-q")
@@ -1763,11 +1826,15 @@ class CuteCatApp(App):
     def _refresh_tokens(self) -> None:
         sent = self._fmt_tokens(self._tok_in)
         reply = self._fmt_tokens(self._tok_out)
-        self.query_one("#app-name", Static).update(f"↑{sent} sent  ↓{reply} reply")
+        label = f"↑{sent} sent  ↓{reply} reply"
+        if self._tok_cached:
+            label += f"  ⚡{self._fmt_tokens(self._tok_cached)} cached"
+        self.query_one("#app-name", Static).update(label)
 
-    def _add_tokens(self, inp: int, out: int) -> None:
+    def _add_tokens(self, inp: int, out: int, cached: int = 0) -> None:
         self._tok_in += inp
         self._tok_out += out
+        self._tok_cached += cached
         self._refresh_tokens()
 
     #session
@@ -1781,6 +1848,9 @@ class CuteCatApp(App):
                 if content:
                     parts.append(f"## skill: {name}\n\n{content}")
         parts.append(SHELL_DIRECTIVES[shell_kind()])
+        parts.append(DELEGATE_DIRECTIVE)
+        if self._sandbox.enabled:
+            parts.append(SANDBOX_DIRECTIVE.format(root=self._sandbox.root))
         parts.append(PLAN_DIRECTIVE if self._agent_mode == "plan" else BUILD_DIRECTIVE)
         return "\n\n".join(parts)
 
@@ -1812,6 +1882,7 @@ class CuteCatApp(App):
                     "input_history": history[-200:],
                     "tokens_in": self._tok_in,
                     "tokens_out": self._tok_out,
+                    "tokens_cached": self._tok_cached,
                 }
             )
         except config_mod.StorageError as exc:
@@ -1841,7 +1912,7 @@ class CuteCatApp(App):
         self.input.set_text("")
 
         if self.mode == CHOICE:
-            return  # answered by single keypress in the popup, not by submit
+            return  # answered in the popup menu, not by submit
         if self.mode == PICK:
             return  # handled by the OptionList (arrow-navigate + enter)
         if self.mode == ENTER_URL:
@@ -1936,6 +2007,7 @@ class CuteCatApp(App):
     def _reset_conversation(self) -> None:
         self.messages.clear()
         self._user_msgs.clear()
+        self._clear_tasks()
         self._stick_bottom = True
         self.chat.remove_children()
         self.add_msg(_welcome(self, self.cwd, resumed=self._resumed), "system", "welcome")
@@ -2063,6 +2135,13 @@ class CuteCatApp(App):
         return False
 
     def on_key(self, event: events.Key) -> None:
+        # the input usually swallows these first; this catches the case where
+        # something else holds focus
+        if self.mode == CHOICE and event.key != "escape":
+            if self._choice_key(event.key):
+                event.stop()
+                event.prevent_default()
+            return
         if self._picker_key(event):
             event.stop()
             event.prevent_default()
@@ -2389,6 +2468,8 @@ class CuteCatApp(App):
         self._resumed = bool(session)
         self._tok_in = int(session.get("tokens_in") or 0)
         self._tok_out = int(session.get("tokens_out") or 0)
+        self._tok_cached = int(session.get("tokens_cached") or 0)
+        self._clear_tasks()
         self._user_msgs.clear()
         self._stick_bottom = True
         self._refresh_tokens()
@@ -2962,6 +3043,7 @@ class CuteCatApp(App):
             return
 
         self.messages.append({"role": "user", "content": text})
+        self._clear_tasks()  # last turn's list is not this turn's
         # Name the terminal tab from the first thing the user asks for.
         if not self._title_started:
             self._title_started = True
@@ -3005,7 +3087,7 @@ class CuteCatApp(App):
         event = threading.Event()
         self._choice_event = event
         self._choice_result = default
-        self._choice_options = {key: result for key, label, result in options}
+        self._choice_options = list(options)
         self._choice_default = default
         self.call_from_thread(self._enter_choice, question, options)
         event.wait()
@@ -3013,19 +3095,62 @@ class CuteCatApp(App):
 
     def _enter_choice(self, question: str, options: list[tuple]) -> None:
         self.query_one("#popup-q", Static).update(Text(question, style=self.c("strong")))
-        opts = Text()
-        for i, (key, label, _result) in enumerate(options):
-            if i:
-                opts.append("   ", style=self.c("faint"))
-            opts.append(f" {key} ", style=f"bold {self.c('bg')} on {self.c('strong')}")
-            opts.append(f" {label}", style=self.c("muted"))
-        opts.append("   ", style=self.c("faint"))
-        opts.append(" esc ", style=f"bold {self.c('bg')} on {self.c('muted')}")
-        opts.append(" cancel", style=self.c("faint"))
-        self.query_one("#popup-opts", Static).update(opts)
+        self._choice_options = list(options)
+        self._choice_index = 0  # allow; esc still denies
+        self._render_choice()
         self.query_one("#popup", Vertical).display = True
         self.mode = CHOICE
         self._idle_indicator("waiting for you")
+
+    def _render_choice(self) -> None:
+        options = self._choice_options or []
+        opts = Text()
+        for i, (_key, label, _result) in enumerate(options):
+            if i:
+                opts.append("\n")
+            if i == self._choice_index:
+                opts.append(" ❯ ", style=f"bold {self.c('strong')}")
+                opts.append(label, style=f"bold {self.c('bg')} on {self.c('strong')}")
+            else:
+                opts.append("   ")
+                opts.append(label, style=self.c("muted"))
+        opts.append("\n\n")
+        opts.append("↑↓", style=self.c("strong"))
+        opts.append(" choose · ", style=self.c("faint"))
+        opts.append("enter", style=self.c("strong"))
+        opts.append(" confirm · ", style=self.c("faint"))
+        opts.append("esc", style=self.c("strong"))
+        opts.append(" cancel", style=self.c("faint"))
+        self.query_one("#popup-opts", Static).update(opts)
+
+    def _move_choice(self, delta: int) -> None:
+        options = self._choice_options or []
+        if not options:
+            return
+        self._choice_index = (self._choice_index + delta) % len(options)
+        self._render_choice()
+
+    def _choice_key(self, key: str) -> bool:
+        """Drive the popup menu. Returns False for keys it doesn't own."""
+        options = self._choice_options or []
+        if key in ("down", "right", "tab"):
+            self._move_choice(1)
+        elif key in ("up", "left", "shift+tab"):
+            self._move_choice(-1)
+        elif key == "enter":
+            if 0 <= self._choice_index < len(options):
+                self._resolve_choice(options[self._choice_index][2])
+            else:
+                self._resolve_choice(self._choice_default)
+        else:
+            # a letter jumps to its option, but still waits for enter
+            for i, (accel, _label, _result) in enumerate(options):
+                if key == accel:
+                    self._choice_index = i
+                    self._render_choice()
+                    return True
+            return False
+        return True
 
     def _hide_popup(self) -> None:
         self.query_one("#popup", Vertical).display = False
@@ -3051,6 +3176,16 @@ class CuteCatApp(App):
         answer = self._await_choice(f"{title}\n{detail}", self._PERMIT, "n")
         return answer == "y"
 
+    def _ask_command(self, command: str, reason: str, kind: str) -> bool:
+        options = list(self._PERMIT)
+        if kind:
+            options.insert(1, ("a", f"allow '{kind}' this session", "a"))
+        answer = self._await_choice(f"run: {command}\n{reason}", options, "n")
+        if answer == "a" and kind:
+            self._allowed_kinds.add(kind)
+            return True
+        return answer == "y"
+
     def _ask_edit(self, title: str, detail: str) -> bool:
         if self._allow_all_edits:
             return True
@@ -3072,6 +3207,133 @@ class CuteCatApp(App):
             self._tmp_granted = True
             return True
         return False
+
+    #task panel
+
+    GLYPH = {"running": "◼", "pending": "◻", "done": "✔", "agent": "◆"}
+    SHOW_DONE = 3
+
+    def _set_tasks(self, tasks: list) -> None:
+        self.call_from_thread(self._apply_tasks, tasks)
+
+    def _apply_tasks(self, tasks: list) -> None:
+        if not self._tasks:
+            self._tasks_started = monotonic()
+        self._tasks = tasks
+        self._refresh_tasks()
+
+    def _clear_tasks(self) -> None:
+        self._tasks = []
+        self._subagents = {}
+        self._refresh_tasks()
+
+    def _refresh_tasks(self) -> None:
+        panel = self.query_one("#taskpanel", Static)
+        if not self._tasks and not self._subagents:
+            panel.display = False
+            return
+        panel.update(self._task_text())
+        panel.display = True
+
+    def _task_text(self) -> Text:
+        running = [t for t in self._tasks if t["status"] == "running"]
+        pending = [t for t in self._tasks if t["status"] == "pending"]
+        done = [t for t in self._tasks if t["status"] == "done"]
+        live = list(self._subagents.values())
+
+        out = Text()
+        head = running[0]["title"] if running else (
+            live[0]["description"] if live else "working"
+        )
+        elapsed = fmt_duration(monotonic() - self._tasks_started)
+        out.append(f" {head}… ", style=self.c("strong"))
+        out.append(f"({elapsed} · ↓{self._fmt_tokens(self._tok_out)} tokens)",
+                   style=self.c("faint"))
+
+        for agent in live:
+            out.append("\n   ")
+            out.append(self.GLYPH["agent"], style=self.c("strong"))
+            spent = fmt_duration(monotonic() - agent["started"])
+            out.append(f" {agent['description']} ", style=self.c("text"))
+            out.append(f"· {spent}", style=self.c("faint"))
+        for task in running + pending:
+            style = self.c("text") if task["status"] == "running" else self.c("muted")
+            out.append("\n   ")
+            out.append(self.GLYPH[task["status"]], style=style)
+            out.append(f" {task['title']}", style=style)
+        for task in done[-self.SHOW_DONE:]:
+            out.append("\n   ")
+            out.append(self.GLYPH["done"], style=self.c("muted"))
+            out.append(f" {task['title']}", style=self.c("faint"))
+        hidden = len(done) - self.SHOW_DONE
+        if hidden > 0:
+            out.append(f"\n    … +{hidden} completed", style=self.c("faint"))
+        return out
+
+    #subagents
+
+    def _spawn_agent(self, description: str, prompt: str, kind: str) -> str:
+        """Run a nested agent on its own context and return only its answer, so
+        the work it did to get there never enters this conversation."""
+        provider = get_provider(self.cfg["provider"])
+        if provider is None:
+            return "error: no provider connected"
+        agent_id = self._next_agent_id
+        self._next_agent_id += 1
+        self.call_from_thread(
+            self._agent_appeared, agent_id, description, monotonic()
+        )
+        messages = [{"role": "user", "content": prompt}]
+        ctx = ToolContext(
+            shell=self._ensure_shell(),
+            ask_permission=self._ask_permission,
+            ask_tmp=self._ask_tmp,
+            note=lambda _t: None,
+            is_cancelled=self._agent_cancel,
+            run_job=self._run_job,
+            show_diff=self._show_diff,
+            ask_edit=self._ask_edit,
+            chromium=self.cfg.get("chromium"),
+            workspace=self.cfg.get("workspace"),
+            sandbox=self._sandbox,
+            allow_kind=lambda k: k in self._allowed_kinds,
+            ask_command=self._ask_command,
+        )
+        system = SUBAGENT_PROMPTS[kind].format(root=self._sandbox.label)
+        answer = ""
+        try:
+            for event in agent_mod.run_agent(
+                provider, self.cfg["api_key"], self.cfg["model"], system,
+                messages, ctx,
+                tools_enabled=not self._tools_disabled,
+                max_steps=SUBAGENT_STEPS,
+                cancelled=self._agent_cancel,
+            ):
+                if isinstance(event, agent_mod.Usage):
+                    self.call_from_thread(
+                        self._add_tokens, event.input, event.output, event.cached
+                    )
+                elif isinstance(event, agent_mod.ToolStarted):
+                    self.call_from_thread(
+                        self._idle_indicator, f"{description} · {event.name}"
+                    )
+                elif isinstance(event, agent_mod.Done):
+                    answer = event.answer
+                elif isinstance(event, agent_mod.Failed):
+                    answer = f"the subagent stopped: {event.message}"
+        finally:
+            self.call_from_thread(self._agent_finished, agent_id)
+        return answer or "the subagent returned nothing"
+
+    def _agent_appeared(self, agent_id: int, description: str, started: float) -> None:
+        if not self._tasks and not self._subagents:
+            self._tasks_started = started
+        self._subagents[agent_id] = {"description": description, "started": started}
+        self._refresh_tasks()
+
+    def _agent_finished(self, agent_id: int) -> None:
+        self._subagents.pop(agent_id, None)
+        self._refresh_tasks()
 
     def _tool_note(self, text: str) -> None:
         self.call_from_thread(self._add_tool_note, text)
@@ -3113,7 +3375,10 @@ class CuteCatApp(App):
         self._running_job = None
         state = "terminated" if self._cmd_control == "terminate" else "done"
         self.call_from_thread(self._cmd_finish, job, state)
-        return tools_mod.format_job_result(command, job.exit_code, job.output())
+        return tools_mod.format_job_result(
+            command, job.exit_code, job.output(),
+            ran_for=job.ran_for, silent_for=job.silent_for,
+        )
 
     def _cmd_title(self, job, suffix: str) -> str:
         return f"$ {self._short_cmd(job.command)}   {suffix}"
@@ -3132,6 +3397,10 @@ class CuteCatApp(App):
         if self._cmd_body is not None:
             out = job.output()
             self._cmd_body.update(Text(out[-4000:] or "running…"))
+        label = f"running · {self._short_cmd(job.command)}"
+        if job.silent_for >= tools_mod.QUIET_COMMAND:
+            label += f" · quiet {int(job.silent_for)}s"
+        self._net_label = f"{label} · esc stop · ctrl+b background"
 
     def _cmd_finish(self, job, state: str) -> None:
         self._idle_indicator()
@@ -3228,10 +3497,17 @@ class CuteCatApp(App):
             show_diff=self._show_diff,
             ask_edit=self._ask_edit,
             chromium=self.cfg.get("chromium"),
+            workspace=self.cfg.get("workspace"),
+            sandbox=self._sandbox,
+            allow_kind=lambda kind: kind in self._allowed_kinds,
+            ask_command=self._ask_command,
+            set_tasks=self._set_tasks,
+            spawn=self._spawn_agent,
         )
         for event in agent_mod.run_agent(
             provider, key, model, self._system, self.messages, ctx,
             tools_enabled=not self._tools_disabled, cancelled=cancelled,
+            extra_schemas=[tools_mod.TASK_SCHEMA, tools_mod.AGENT_SCHEMA],
         ):
             if cancelled():
                 return
@@ -3240,7 +3516,9 @@ class CuteCatApp(App):
             elif isinstance(event, agent_mod.Content):
                 self.call_from_thread(self._stream_chunk, event.full, op)
             elif isinstance(event, agent_mod.Usage):
-                self.call_from_thread(self._add_tokens, event.input, event.output)
+                self.call_from_thread(
+                    self._add_tokens, event.input, event.output, event.cached
+                )
             elif isinstance(event, agent_mod.ToolsDisabled):
                 self._tools_disabled = True
                 self.call_from_thread(self._tool_note, event.reason)
@@ -3249,8 +3527,8 @@ class CuteCatApp(App):
                 # doesn't look like the agent has stalled.
                 self.call_from_thread(self._idle_indicator, f"working · {event.name}")
             elif isinstance(event, agent_mod.ToolFinished):
-                # run_command renders its own collapsible via _run_job.
-                if event.name != "run_command":
+                # both draw themselves elsewhere
+                if event.name not in ("run_command", "set_tasks"):
                     self.call_from_thread(
                         self._show_tool_result, event.name, event.result, op
                     )
@@ -3310,6 +3588,8 @@ class CuteCatApp(App):
                 f" · thought {fmt_duration(self._t_content - self._t_start)}"
             )
         self.indicator.update(Text(label))
+        if self._tasks or self._subagents:
+            self._refresh_tasks()  # keeps the elapsed clock live
         self._flush_md()  # push the latest streamed markdown at the tick rate
 
     def _begin_segment(self, op: int) -> None:

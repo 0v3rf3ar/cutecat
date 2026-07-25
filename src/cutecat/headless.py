@@ -46,7 +46,10 @@ class HeadlessRun:
             job.finished.wait(10)
             return "error: the command was still running after 15 minutes and was stopped"
         self.shell.adopt_cwd(job)
-        return tools_mod.format_job_result(command, job.exit_code, job.output())
+        return tools_mod.format_job_result(
+            command, job.exit_code, job.output(),
+            ran_for=job.ran_for, silent_for=job.silent_for,
+        )
 
     def context(self, chromium: str | None) -> ToolContext:
         return ToolContext(

@@ -132,10 +132,6 @@ _INTERPRETERS = {"python", "python2", "python3", "node", "nodejs", "ruby", "php"
                  "lua", "tclsh", "Rscript"}
 _VERSION_FLAGS = {"--version", "-version", "-V", "-v", "--help", "-h", "--info"}
 
-_ALWAYS_ASK_TOKENS = re.compile(
-    r"(^|\s)(sudo|doas|su|pkexec|runas)\b|-verb\s+runas", re.IGNORECASE
-)
-
 _TMP_RE = re.compile(
     r"(^|[^\w])(/tmp|/var/tmp|/private/tmp)(/|\b)"
     r"|\$TMPDIR|%TEMP%|%TMP%|\$env:te?mp",
@@ -143,11 +139,59 @@ _TMP_RE = re.compile(
 )
 
 
+ALLOW = "allow"
+WRITE = "write"
+DANGER = "danger"
+
+# always ask, sandbox or not
+_DANGER_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"(^|\s)(sudo|doas|su|pkexec|runas)\b|-verb\s+runas", re.I),
+     "runs with elevated privileges"),
+    (re.compile(r"(^|\s)rm\s+(-[a-z]*[rf][a-z]*\s+)+", re.I), "recursive delete"),
+    (re.compile(r"(^|\s)(shred|mkfs\S*|fdisk|parted|dd)\b", re.I), "destroys data"),
+    (re.compile(r"(^|\s)(chmod|chown|chgrp)\s+(-[a-z]*R|--recursive)\b", re.I),
+     "recursive permission change"),
+    (re.compile(r"(^|\s)git\s+push\b", re.I), "publishes to a remote"),
+    (re.compile(r"(^|\s)git\s+(reset\s+--hard|clean\s+-[a-z]*f|rebase|filter-branch)\b", re.I),
+     "rewrites history or discards work"),
+    (re.compile(r"(^|\s)gh\s+(repo\s+(create|delete|archive)|pr\s+(merge|close)"
+                r"|release\s+(create|delete)|secret\s+set)\b", re.I),
+     "changes something on GitHub"),
+    (re.compile(r"(curl|wget|iwr|invoke-webrequest)\b[^|]*\|\s*(sudo\s+)?"
+                r"(ba|z|k|fi)?sh\b|\|\s*(sudo\s+)?python[0-9.]*\b", re.I),
+     "pipes a download straight into a shell"),
+    (re.compile(r"(^|\s)(apt|apt-get|dnf|yum|pacman|zypper|brew|snap|flatpak)\s+"
+                r"(install|remove|purge|upgrade|update)\b", re.I),
+     "changes system packages"),
+    (re.compile(r"(^|\s)(npm|pnpm|yarn)\s+(install|add|i)\b[^|;&]*\s-g\b|"
+                r"(^|\s)(npm|pnpm|yarn)\s+publish\b", re.I),
+     "installs globally or publishes"),
+    (re.compile(r"(^|\s)(reboot|shutdown|halt|poweroff|init)\b", re.I), "halts the machine"),
+    (re.compile(r"(^|\s)(kill|pkill|killall)\b", re.I), "kills processes"),
+    (re.compile(r"(^|\s)systemctl\s+(?!status|list|is-|show|cat)", re.I),
+     "changes a system service"),
+    (re.compile(r"(^|\s)(crontab|at|schtasks)\b", re.I), "schedules background work"),
+]
+
+
 @dataclass
 class Decision:
-    allowed: bool
+    verdict: str
     reason: str
     touches_tmp: bool
+
+    @property
+    def allowed(self) -> bool:
+        """True when the command needs no gate at all."""
+        return self.verdict == ALLOW
+
+
+def danger(command: str) -> str | None:
+    for pattern, reason in _DANGER_RULES:
+        if pattern.search(command):
+            return reason
+    return None
+
 
 def touches_tmp(command: str) -> bool:
     return bool(_TMP_RE.search(command))
@@ -197,25 +241,26 @@ def classify(command: str) -> Decision:
     cmd = command.strip()
     tmp = touches_tmp(cmd)
 
-    if _ALWAYS_ASK_TOKENS.search(cmd):
-        return Decision(False, "runs with elevated privileges", tmp)
+    reason = danger(cmd)
+    if reason:
+        return Decision(DANGER, reason, tmp)
 
     # command substitution can hide arbitrary writes
     if "`" in cmd or "$(" in cmd:
-        return Decision(False, "uses command substitution", tmp)
+        return Decision(WRITE, "uses command substitution", tmp)
 
     # write redirections (allow only to the null/std devices)
     for m in re.finditer(r"\d*>>?|>&|&>", cmd):
         after = cmd[m.end():].lstrip()
         target = after.split()[0] if after else ""
         if target not in ("/dev/null", "/dev/stdout", "/dev/stderr", "&1", "&2", "/dev/tty"):
-            return Decision(False, "writes to a file (redirection)", tmp)
+            return Decision(WRITE, "writes to a file (redirection)", tmp)
 
     # split on chains and pipes; every segment must be read-only
     segments = re.split(r"\|\||&&|;|\||&(?!>)", cmd)
     for seg in segments:
         if not _segment_is_readonly(seg):
             tok = _first_token(seg)
-            return Decision(False, f"'{tok or seg.strip()}' may change the system", tmp)
+            return Decision(WRITE, f"'{tok or seg.strip()}' may change the system", tmp)
 
-    return Decision(True, "", tmp)
+    return Decision(ALLOW, "", tmp)

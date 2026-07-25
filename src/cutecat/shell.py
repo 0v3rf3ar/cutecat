@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 
 IS_WINDOWS = os.name == "nt"
 CWD_MARK = "__CUTECAT_CWD__:"
@@ -49,10 +50,24 @@ class Job:
         self.finished = threading.Event()
         self.cwd_after: str | None = None
         self.backgrounded = False
+        self.started = time.monotonic()
+        self.last_output = self.started
 
     def _append(self, text: str) -> None:
         with self._lock:
             self._chunks.append(text)
+            self.last_output = time.monotonic()
+
+    @property
+    def silent_for(self) -> float:
+        """Seconds since it last said anything. A command can be busy and quiet
+        (a compile) or hung and quiet — the caller decides, but it cannot
+        decide without this."""
+        return time.monotonic() - self.last_output
+
+    @property
+    def ran_for(self) -> float:
+        return time.monotonic() - self.started
 
     def output(self) -> str:
         with self._lock:

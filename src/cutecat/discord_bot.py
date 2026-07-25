@@ -423,7 +423,10 @@ class Turn:
             job.finished.wait(10)
             return "error: the command ran for 15 minutes and was stopped"
         self.session.shell.adopt_cwd(job)
-        return tools_mod.format_job_result(command, job.exit_code, job.output())
+        return tools_mod.format_job_result(
+            command, job.exit_code, job.output(),
+            ran_for=job.ran_for, silent_for=job.silent_for,
+        )
 
     def _ask_permission(self, title: str, detail: str) -> bool:
         return self._permission(title, detail, allow_all=False) == "y"
